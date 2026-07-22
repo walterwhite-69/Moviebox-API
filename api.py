@@ -57,54 +57,137 @@ PLAYER_HEADERS = {
     "sec-fetch-site": "same-origin",
 }
 
+# ============================================================
+# 🔥 TOKEN MANAGEMENT - FIXED
+# ============================================================
+
 async def _get_bearer_token() -> str:
     """Auto-acquire a guest JWT from the x-user response header."""
     global _bearer_token
     if _bearer_token:
         return _bearer_token
+    
     async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
-        resp = await client.get(f"{API_BASE}/home?host=moviebox.ph", headers=DEFAULT_HEADERS)
-        x_user = resp.headers.get("x-user")
-        if x_user:
-            _bearer_token = json.loads(x_user).get("token")
-        if not _bearer_token:
-            # fallback: read from set-cookie
+        try:
+            resp = await client.get(f"{API_BASE}/home?host=moviebox.ph", headers=DEFAULT_HEADERS)
+            
+            # Try to get token from x-user header
+            x_user = resp.headers.get("x-user")
+            if x_user:
+                try:
+                    _bearer_token = json.loads(x_user).get("token")
+                    if _bearer_token:
+                        return _bearer_token
+                except:
+                    pass
+            
+            # Fallback: read from set-cookie
             cookie = resp.headers.get("set-cookie", "")
-            import re as _re
-            m = _re.search(r"token=([^;]+)", cookie)
+            m = re.search(r"token=([^;]+)", cookie)
             if m:
                 _bearer_token = m.group(1)
+                return _bearer_token
+            
+            # Last resort: try to get from response body
+            try:
+                data = resp.json()
+                token = data.get("data", {}).get("token") or data.get("token")
+                if token:
+                    _bearer_token = token
+                    return _bearer_token
+            except:
+                pass
+                
+        except Exception as e:
+            print(f"Token acquisition error: {e}")
+    
     return _bearer_token or ""
 
-async def _make_request(url: str, method: str = "GET", payload: dict = None, custom_headers: dict = None) -> dict:
+async def _force_refresh_token() -> str:
+    """Force refresh the bearer token"""
     global _bearer_token
-    token = await _get_bearer_token()
+    _bearer_token = None
+    return await _get_bearer_token()
+
+# ============================================================
+# 📡 FIXED REQUEST HANDLER
+# ============================================================
+
+async def _make_request(url: str, method: str = "GET", payload: dict = None, custom_headers: dict = None, retry_count: int = 0) -> dict:
+    """Make authenticated request with automatic token refresh"""
+    global _bearer_token
+    
+    # Get valid token
+    if not _bearer_token:
+        await _force_refresh_token()
+    
+    token = _bearer_token
     headers = {
         **DEFAULT_HEADERS,
         "Authorization": f"Bearer {token}" if token else "",
         **(custom_headers or {})
     }
-    async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
+    
+    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as client:
         try:
+            # Make the request
             if method == "POST":
                 resp = await client.post(url, headers=headers, json=payload)
             else:
                 resp = await client.get(url, headers=headers)
 
-            # Refresh token if server sends a new one
+            # Handle token expiration (401/403)
+            if resp.status_code in [401, 403] and retry_count < 2:
+                print(f"Token expired, refreshing... (attempt {retry_count + 1})")
+                _bearer_token = None
+                token = await _get_bearer_token()
+                headers["Authorization"] = f"Bearer {token}"
+                
+                # Retry the request
+                if method == "POST":
+                    resp = await client.post(url, headers=headers, json=payload)
+                else:
+                    resp = await client.get(url, headers=headers)
+                
+                retry_count += 1
+
+            # Update token if server sends new one
             x_user = resp.headers.get("x-user")
             if x_user:
-                new_token = json.loads(x_user).get("token")
-                if new_token:
-                    _bearer_token = new_token
+                try:
+                    new_token = json.loads(x_user).get("token")
+                    if new_token:
+                        _bearer_token = new_token
+                except:
+                    pass
 
+            # Check response status
             if resp.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"Upstream API error: {resp.status_code}")
+                error_detail = f"Upstream API error: {resp.status_code}"
+                try:
+                    error_data = resp.json()
+                    if error_data.get("message"):
+                        error_detail = error_data.get("message")
+                except:
+                    pass
+                raise HTTPException(status_code=502, detail=error_detail)
 
-            return resp.json()
+            # Parse response
+            try:
+                return resp.json()
+            except json.JSONDecodeError:
+                return {"raw": resp.text}
+
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="Request timeout")
         except Exception as e:
-            if isinstance(e, HTTPException): raise e
+            if isinstance(e, HTTPException):
+                raise e
             raise HTTPException(status_code=502, detail=f"Request failed: {str(e)}")
+
+# ============================================================
+# 🏠 DASHBOARD
+# ============================================================
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
@@ -373,6 +456,10 @@ async def dashboard():
     """
     return HTMLResponse(content=html_content)
 
+# ============================================================
+# 🏠 HOME ENDPOINT
+# ============================================================
+
 @app.get("/home")
 async def get_home():
     url = f"{API_BASE}/home?host=moviebox.ph"
@@ -402,6 +489,10 @@ async def get_home():
             sections.append({"section": title, "count": len(items), "items": items})
     return {"status": "success", "sections": sections}
 
+# ============================================================
+# 📦 CATEGORY HELPER
+# ============================================================
+
 async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sort: str = "RECOMMEND") -> dict:
     url = f"{API_BASE}/subject/filter"
     payload = {"tabId": tab_id, "filter": {"sort": sort, "genre": "ALL", "country": "ALL", "year": "ALL", "language": "ALL"}, "page": page, "perPage": per_page}
@@ -421,6 +512,10 @@ async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sor
     total = pager.get("totalCount") or inner.get("total") or len(items)
     return {"page": page, "per_page": per_page, "total": total, "items": items}
 
+# ============================================================
+# 🎬 CATALOG ENDPOINTS
+# ============================================================
+
 @app.get("/movies")
 async def get_movies(page: int = 1, sort: str = "RECOMMEND"):
     return await _get_category_data(tab_id=2, page=page, sort=sort)
@@ -432,6 +527,10 @@ async def get_tv_series(page: int = 1, sort: str = "RECOMMEND"):
 @app.get("/animation")
 async def get_animation(page: int = 1, sort: str = "RECOMMEND"):
     return await _get_category_data(tab_id=8, page=page, sort=sort)
+
+# ============================================================
+# 🔍 SEARCH ENDPOINTS - FIXED
+# ============================================================
 
 @app.get("/search/suggest")
 async def get_search_suggestions(q: str = Query(..., min_length=1)):
@@ -451,24 +550,78 @@ async def get_search_suggestions(q: str = Query(..., min_length=1)):
 
 @app.get("/search")
 async def search(q: str = Query(..., min_length=1), page: int = 1):
+    """Search with automatic token refresh"""
     url = f"{API_BASE}/subject/search"
-    data = await _make_request(url, method="POST", payload={"keyword": q, "page": page, "perPage": 20})
-    inner = data.get("data", {})
-    raw = inner.get("items", inner.get("list", []))
-    items = [{
-        "name": sub.get("title"),
-        "poster_url": sub.get("cover", {}).get("url"),
-        "slug": sub.get("detailPath"),
-        "subject_id": sub.get("subjectId")
-    } for sub in raw]
-    pager = inner.get("pager", {})
-    total = pager.get("totalCount") or inner.get("total") or len(items)
-    return {"query": q, "page": page, "total": total, "items": items}
+    
+    try:
+        data = await _make_request(url, method="POST", payload={"keyword": q, "page": page, "perPage": 20})
+        inner = data.get("data", {})
+        raw = inner.get("items", inner.get("list", []))
+        
+        items = [{
+            "name": sub.get("title"),
+            "poster_url": sub.get("cover", {}).get("url"),
+            "slug": sub.get("detailPath"),
+            "subject_id": sub.get("subjectId"),
+            "year": sub.get("releaseDate", "")[:4] if sub.get("releaseDate") else None,
+            "rating": sub.get("imdbRatingValue")
+        } for sub in raw if sub.get("title")]
+        
+        pager = inner.get("pager", {})
+        total = pager.get("totalCount") or inner.get("total") or len(items)
+        
+        return {
+            "status": "success",
+            "query": q, 
+            "page": page, 
+            "total": total,
+            "results": items,
+            "count": len(items)
+        }
+        
+    except HTTPException as e:
+        # If token fails, try fallback method
+        if "406" in str(e.detail) or "401" in str(e.detail) or "403" in str(e.detail):
+            # Force refresh token and retry once
+            await _force_refresh_token()
+            data = await _make_request(url, method="POST", payload={"keyword": q, "page": page, "perPage": 20})
+            inner = data.get("data", {})
+            raw = inner.get("items", inner.get("list", []))
+            
+            items = [{
+                "name": sub.get("title"),
+                "poster_url": sub.get("cover", {}).get("url"),
+                "slug": sub.get("detailPath"),
+                "subject_id": sub.get("subjectId"),
+                "year": sub.get("releaseDate", "")[:4] if sub.get("releaseDate") else None,
+                "rating": sub.get("imdbRatingValue")
+            } for sub in raw if sub.get("title")]
+            
+            pager = inner.get("pager", {})
+            total = pager.get("totalCount") or inner.get("total") or len(items)
+            
+            return {
+                "status": "success",
+                "query": q, 
+                "page": page, 
+                "total": total,
+                "results": items,
+                "count": len(items)
+            }
+        raise e
+
+# ============================================================
+# 📄 DETAIL ENDPOINT
+# ============================================================
 
 @app.get("/detail/{slug}")
 async def get_movie_detail(slug: str):
     url = f"{API_BASE}/detail?detailPath={slug}"
     return await _make_request(url)
+
+# ============================================================
+# 🎥 STREAM ENDPOINTS
+# ============================================================
 
 @app.get("/api/stream/{subject_id}")
 async def get_stream_sources(subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
@@ -551,6 +704,10 @@ async def get_captions(subject_id: str, detail_path: str, se: int = 1, ep: int =
     captions = inner.get("captions", []) if isinstance(inner, dict) else inner
     return {"subject_id": subject_id, "se": se, "ep": ep, "count": len(captions), "captions": captions}
 
+# ============================================================
+# 🚀 RUN
+# ============================================================
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("newapi:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
