@@ -6,6 +6,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
+# Print statement updated as requested
+print("Goodbye")
+
 app = FastAPI(
     title="MovieBox API Pro",
     description="Full Pure REST API for moviebox.ph — Zero Scraping",
@@ -21,6 +24,7 @@ app.add_middleware(
 
 BASE_URL = "https://moviebox.ph"
 API_BASE = "https://h5-api.aoneroom.com/wefeed-h5api-bff"
+STREAM_BASE = "https://h5.aoneroom.com/wefeed-h5-bff"
 
 _bearer_token: str | None = None
 
@@ -40,15 +44,12 @@ DEFAULT_HEADERS = {
     "sec-fetch-site": "cross-site",
 }
 
-# Player-side headers for the stream domain (netfilm.world)
 PLAYER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-    "Accept": "application/json",
+    "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
+    "Origin": "https://h5.aoneroom.com",
     "X-Client-Info": '{"timezone":"Asia/Dhaka"}',
-    "X-Source": "",
     "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Windows"',
@@ -68,7 +69,6 @@ async def _get_bearer_token() -> str:
         if x_user:
             _bearer_token = json.loads(x_user).get("token")
         if not _bearer_token:
-            # fallback: read from set-cookie
             cookie = resp.headers.get("set-cookie", "")
             import re as _re
             m = _re.search(r"token=([^;]+)", cookie)
@@ -91,7 +91,6 @@ async def _make_request(url: str, method: str = "GET", payload: dict = None, cus
             else:
                 resp = await client.get(url, headers=headers)
 
-            # Refresh token if server sends a new one
             x_user = resp.headers.get("x-user")
             if x_user:
                 new_token = json.loads(x_user).get("token")
@@ -346,7 +345,7 @@ async def dashboard():
                     <div class="card-title"><i>🎬</i> Stream Engine</div>
                     <p class="card-desc">Dynamic domain discovery and direct MP4 extraction. Supports multiple resolutions and qualities.</p>
                     <div class="endpoint">/api/stream/{subject_id}</div>
-                    <a href="/api/stream/56988683026712168?detail_path=attack-on-titan-hindi-kGWQOIx0d4" target="_blank" class="btn">Get Player Link</a>
+                    <a href="/api/stream/56988683026712168?detail_path=attack-on-titan-hindi-kGWQOIx0d4&se=0&ep=0" target="_blank" class="btn">Get Player Link</a>
                 </div>
 
                 <div class="card">
@@ -471,57 +470,45 @@ async def get_movie_detail(slug: str):
     return await _make_request(url)
 
 @app.get("/api/stream/{subject_id}")
-async def get_stream_sources(subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
-    # Step 1: get the player domain
-    dom_data = await _make_request(f"{API_BASE}/media-player/get-domain")
-    domain = dom_data.get("data", "https://netfilm.world").rstrip("/")
-
-    # Step 2: build the Referer the way the real browser player does
-    player_referer = (
-        f"{domain}/spa/videoPlayPage/movies/{detail_path}"
-        f"?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
-    )
-    play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
+async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 0, ep: int = 0):
+    play_url = f"{STREAM_BASE}/web/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
+    player_referer = f"https://h5.aoneroom.com/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
         resp = await client.get(play_url, headers={**PLAYER_HEADERS, "Referer": player_referer})
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail="Stream service unavailable")
         data = resp.json().get("data", {})
 
     has_resource = data.get("hasResource", False)
     streams = [
         {
-            "resolution": f"{s.get('resolutions')}p",
-            "format": s.get("format"),
+            "resolution": f"{s.get('resolutions')}p" if s.get('resolutions') else "HD",
+            "format": s.get("format", "mp4"),
             "url": s.get("url"),
             "size": s.get("size"),
             "duration": s.get("duration"),
             "codec": s.get("codecName")
         }
-        for s in data.get("streams", [])
+        for s in data.get("streams", []) if s.get("url")
     ]
     return {
         "subject_id": subject_id,
         "se": se,
         "ep": ep,
-        "has_resource": has_resource,
+        "has_resource": has_resource or len(streams) > 0,
         "sources": streams,
         "hls": data.get("hls", []),
         "dash": data.get("dash", []),
         "free_episodes": data.get("freeNum"),
         "limited": data.get("limited", False),
-        "note": None if has_resource else "No stream found for this episode."
+        "note": None if (has_resource or len(streams) > 0) else "No stream found for this selection."
     }
 
 @app.get("/api/stream/{subject_id}/captions")
-async def get_captions(subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
-    dom_data = await _make_request(f"{API_BASE}/media-player/get-domain")
-    domain = dom_data.get("data", "https://netfilm.world").rstrip("/")
-
-    player_referer = (
-        f"{domain}/spa/videoPlayPage/movies/{detail_path}"
-        f"?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
-    )
-    play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
+async def get_captions(subject_id: str, detail_path: str = "", se: int = 0, ep: int = 0):
+    play_url = f"{STREAM_BASE}/web/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
+    player_referer = f"https://h5.aoneroom.com/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
         play_resp = await client.get(play_url, headers={**PLAYER_HEADERS, "Referer": player_referer})
@@ -553,4 +540,5 @@ async def get_captions(subject_id: str, detail_path: str, se: int = 1, ep: int =
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("newapi:app", host="0.0.0.0", port=8000, reload=True)
+    # ডায়নামিক ইম্পোর্ট ফিক্স করতে "api:app" দেওয়া হয়েছে
+    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)
