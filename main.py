@@ -396,9 +396,9 @@ async def dashboard():
     return HTMLResponse(content=html_content)
 
 @app.get("/home")
-async def get_home():
+async def get_home(request: Request):
     url = f"{API_BASE}/home?host=moviebox.ph"
-    data = await _make_request(url)
+    data = await _make_request(url, client_ip=_client_ip(request))
     sections = []
     for op in data.get("data", {}).get("operatingList", []) or []:
         op_type = op.get("type")
@@ -424,10 +424,10 @@ async def get_home():
             sections.append({"section": title, "count": len(items), "items": items})
     return {"status": "success", "sections": sections}
 
-async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sort: str = "RECOMMEND") -> dict:
+async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sort: str = "RECOMMEND", client_ip: str = "") -> dict:
     url = f"{API_BASE}/subject/filter"
     payload = {"tabId": tab_id, "filter": {"sort": sort, "genre": "ALL", "country": "ALL", "year": "ALL", "language": "ALL"}, "page": page, "perPage": per_page}
-    data = await _make_request(url, method="POST", payload=payload)
+    data = await _make_request(url, method="POST", payload=payload, client_ip=client_ip)
     inner = data.get("data", {})
     raw_items = inner.get("items", inner.get("subjects", []))
     items = [{
@@ -444,21 +444,21 @@ async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sor
     return {"page": page, "per_page": per_page, "total": total, "items": items}
 
 @app.get("/movies")
-async def get_movies(page: int = 1, sort: str = "RECOMMEND"):
-    return await _get_category_data(tab_id=2, page=page, sort=sort)
+async def get_movies(request: Request, page: int = 1, sort: str = "RECOMMEND"):
+    return await _get_category_data(tab_id=2, page=page, sort=sort, client_ip=_client_ip(request))
 
 @app.get("/tv-series")
-async def get_tv_series(page: int = 1, sort: str = "RECOMMEND"):
-    return await _get_category_data(tab_id=5, page=page, sort=sort)
+async def get_tv_series(request: Request, page: int = 1, sort: str = "RECOMMEND"):
+    return await _get_category_data(tab_id=5, page=page, sort=sort, client_ip=_client_ip(request))
 
 @app.get("/animation")
-async def get_animation(page: int = 1, sort: str = "RECOMMEND"):
-    return await _get_category_data(tab_id=8, page=page, sort=sort)
+async def get_animation(request: Request, page: int = 1, sort: str = "RECOMMEND"):
+    return await _get_category_data(tab_id=8, page=page, sort=sort, client_ip=_client_ip(request))
 
 @app.get("/search/suggest")
-async def get_search_suggestions(q: str = Query(..., min_length=1)):
+async def get_search_suggestions(request: Request, q: str = Query(..., min_length=1)):
     url = f"{API_BASE}/subject/search-suggest"
-    data = await _make_request(url, method="POST", payload={"keyword": q, "perPage": 10})
+    data = await _make_request(url, method="POST", payload={"keyword": q, "perPage": 10}, client_ip=_client_ip(request))
     inner = data.get("data", {})
     raw = inner.get("items", inner.get("list", []))
     suggestions = []
@@ -488,9 +488,9 @@ async def search(q: str = Query(..., min_length=1), page: int = 1):
     return {"query": q, "page": page, "total": total, "items": items}
 
 @app.get("/detail/{slug}")
-async def get_movie_detail(slug: str):
+async def get_movie_detail(request: Request, slug: str):
     url = f"{API_BASE}/detail?detailPath={slug}"
-    return await _make_request(url)
+    return await _make_request(url, client_ip=_client_ip(request))
 
 @app.get("/api/stream/{subject_id}")
 async def get_stream_sources(subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
