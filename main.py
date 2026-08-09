@@ -3,7 +3,7 @@ import re
 import json
 import httpx
 import asyncio
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
@@ -77,12 +77,33 @@ async def _get_bearer_token() -> str:
                 _bearer_token = m.group(1)
     return _bearer_token or ""
 
-async def _make_request(url: str, method: str = "GET", payload: dict = None, custom_headers: dict = None) -> dict:
+def _client_ip(request: Request | None) -> str:
+    """Best-effort resolve of the real client IP from proxy headers."""
+    if request is None:
+        return ""
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    real = request.headers.get("x-real-ip")
+    if real:
+        return real.strip()
+    return request.client.host if request.client else ""
+
+
+def _geo_headers(client_ip: str) -> dict:
+    """Forward the caller's IP upstream so the CDN sees a residential client."""
+    if not client_ip:
+        return {}
+    return {"X-Forwarded-For": client_ip, "X-Real-IP": client_ip}
+
+
+async def _make_request(url: str, method: str = "GET", payload: dict = None, custom_headers: dict = None, client_ip: str = "") -> dict:
     global _bearer_token
     token = await _get_bearer_token()
     headers = {
         **DEFAULT_HEADERS,
         "Authorization": f"Bearer {token}" if token else "",
+        **_geo_headers(client_ip),
         **(custom_headers or {})
     }
     async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
