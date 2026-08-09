@@ -493,9 +493,11 @@ async def get_movie_detail(request: Request, slug: str):
     return await _make_request(url, client_ip=_client_ip(request))
 
 @app.get("/api/stream/{subject_id}")
-async def get_stream_sources(subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
+async def get_stream_sources(request: Request, subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
+    client_ip = _client_ip(request)
+
     # Step 1: get the player domain
-    dom_data = await _make_request(f"{API_BASE}/media-player/get-domain")
+    dom_data = await _make_request(f"{API_BASE}/media-player/get-domain", client_ip=client_ip)
     domain = dom_data.get("data", "https://netfilm.world").rstrip("/")
 
     # Step 2: build the Referer the way the real browser player does
@@ -506,7 +508,7 @@ async def get_stream_sources(subject_id: str, detail_path: str, se: int = 1, ep:
     play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
-        resp = await client.get(play_url, headers={**PLAYER_HEADERS, "Referer": player_referer})
+        resp = await client.get(play_url, headers={**PLAYER_HEADERS, **_geo_headers(client_ip), "Referer": player_referer})
         data = resp.json().get("data", {})
 
     has_resource = data.get("hasResource", False)
@@ -535,8 +537,10 @@ async def get_stream_sources(subject_id: str, detail_path: str, se: int = 1, ep:
     }
 
 @app.get("/api/stream/{subject_id}/captions")
-async def get_captions(subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
-    dom_data = await _make_request(f"{API_BASE}/media-player/get-domain")
+async def get_captions(request: Request, subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
+    client_ip = _client_ip(request)
+
+    dom_data = await _make_request(f"{API_BASE}/media-player/get-domain", client_ip=client_ip)
     domain = dom_data.get("data", "https://netfilm.world").rstrip("/")
 
     player_referer = (
@@ -546,7 +550,7 @@ async def get_captions(subject_id: str, detail_path: str, se: int = 1, ep: int =
     play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
-        play_resp = await client.get(play_url, headers={**PLAYER_HEADERS, "Referer": player_referer})
+        play_resp = await client.get(play_url, headers={**PLAYER_HEADERS, **_geo_headers(client_ip), "Referer": player_referer})
         play_data = play_resp.json().get("data", {})
 
     streams = play_data.get("streams", [])
@@ -568,7 +572,7 @@ async def get_captions(subject_id: str, detail_path: str, se: int = 1, ep: int =
         f"{API_BASE}/subject/caption"
         f"?format={stream_format}&id={stream_id}&subjectId={subject_id}&detailPath={detail_path}"
     )
-    data = await _make_request(cap_url)
+    data = await _make_request(cap_url, client_ip=client_ip)
     inner = data.get("data", {})
     captions = inner.get("captions", []) if isinstance(inner, dict) else inner
     return {"subject_id": subject_id, "se": se, "ep": ep, "count": len(captions), "captions": captions}
