@@ -1,4 +1,11 @@
-import httpx, json
+import httpx, json, sys
+
+# Reconfigure stdout to use UTF-8 on Windows consoles to prevent emoji-related crash
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+    except AttributeError:
+        pass
 
 BASE = "http://localhost:8000"
 
@@ -29,14 +36,16 @@ for path in ENDPOINTS:
     url = BASE + path
     try:
         r = httpx.get(url, timeout=30)
-        data = r.json()
         status = "OK" if r.status_code == 200 else f"ERR {r.status_code}"
         print(f"\n[{status}] {path}")
 
         # Root
         if path == "/":
-            print(f"  endpoints listed: {len(data.get('endpoints', []))}")
+            has_html = "<html" in r.text.lower()
+            print(f"  Developer Dashboard: {'OK (HTML)' if has_html else 'FAIL'}")
             continue
+
+        data = r.json()
 
         # Banner
         if path == "/home/banner":

@@ -57,6 +57,100 @@ PLAYER_HEADERS = {
     "sec-fetch-site": "same-origin",
 }
 
+# ── Content Validation Helpers ──────────────────────────────────────
+# These check whether a given slug actually has a valid detail response
+# (not 404, not premium-only) so we can filter out unavailable content
+# before sending results to the Roku client.
+#
+# Performance: Uses a concurrency semaphore (max 5 parallel), an
+# in-memory cache (TTL 10 min), and a batch timeout (15s) to avoid
+# blocking the Roku loading screen.
+
+import time as _time
+
+_slug_cache: dict[str, tuple[bool, float]] = {}   # slug -> (is_valid, timestamp)
+_CACHE_TTL = 600   # 10 minutes
+_validation_semaphore = asyncio.Semaphore(5)       # max 5 concurrent upstream checks
+
+
+async def _validate_slug(slug: str, client: httpx.AsyncClient, token: str) -> bool:
+    """Return True if the slug has a valid detail response."""
+    if not slug:
+        return False
+
+    # Check cache first
+    cached = _slug_cache.get(slug)
+    if cached:
+        is_valid, ts = cached
+        if _time.time() - ts < _CACHE_TTL:
+            return is_valid
+
+    url = f"{API_BASE}/detail?detailPath={slug}"
+    try:
+        headers = {
+            **DEFAULT_HEADERS,
+            "Authorization": f"Bearer {token}" if token else "",
+        }
+        async with _validation_semaphore:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            _slug_cache[slug] = (False, _time.time())
+            return False
+        data = resp.json()
+        detail_data = data.get("data")
+        if not detail_data:
+            _slug_cache[slug] = (False, _time.time())
+            return False
+        subject = detail_data.get("subject")
+        if not subject:
+            _slug_cache[slug] = (False, _time.time())
+            return False
+        if subject.get("isPremium") is True:
+            _slug_cache[slug] = (False, _time.time())
+            return False
+        _slug_cache[slug] = (True, _time.time())
+        return True
+    except Exception:
+        _slug_cache[slug] = (False, _time.time())
+        return False
+
+
+async def _validate_items(items: list) -> list:
+    """Filter a list of items, keeping only those with valid detail slugs.
+    Uses a shared client, semaphore for concurrency control, and a batch timeout."""
+    if not items:
+        return items
+
+    token = await _get_bearer_token()
+
+    async def _do_validation():
+        async with httpx.AsyncClient(follow_redirects=True, timeout=8) as client:
+            async def _check(item):
+                slug = item.get("slug")
+                is_valid = await _validate_slug(slug, client, token)
+                return (item, is_valid)
+
+            results = await asyncio.gather(
+                *[_check(item) for item in items],
+                return_exceptions=True
+            )
+        valid_items = []
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+            item, is_valid = result
+            if is_valid:
+                valid_items.append(item)
+        return valid_items
+
+    try:
+        # Total batch timeout — if validation takes too long, return all items
+        # rather than blocking the Roku loading screen forever
+        return await asyncio.wait_for(_do_validation(), timeout=15.0)
+    except asyncio.TimeoutError:
+        print("[VALIDATE] Batch validation timed out, returning all items unfiltered")
+        return items
+
 async def _get_bearer_token() -> str:
     """Auto-acquire a guest JWT from the x-user response header."""
     global _bearer_token
@@ -389,6 +483,8 @@ async def get_home():
                 "subject_id": (item.get("subject") or {}).get("subjectId"),
                 "badge": (item.get("subject") or {}).get("corner")
             } for item in op.get("banner", {}).get("items", []) if item.get("title") and "Communities" not in item.get("title")]
+            # Validate banner items — remove those with no valid detail page
+            items = await _validate_items(items)
             sections.append({"section": "Banner", "count": len(items), "items": items})
         elif op_type in ["SUBJECTS_MOVIE", "SUBJECTS_TV", "SUBJECTS_ANIMATION"]:
             items = [{
@@ -399,6 +495,8 @@ async def get_home():
                 "badge": sub.get("corner"),
                 "rating": sub.get("imdbRatingValue")
             } for sub in op.get("subjects", [])]
+            # Validate section items — remove those with no valid detail page
+            items = await _validate_items(items)
             sections.append({"section": title, "count": len(items), "items": items})
     return {"status": "success", "sections": sections}
 
@@ -459,8 +557,16 @@ async def search(q: str = Query(..., min_length=1), page: int = 1):
         "name": sub.get("title"),
         "poster_url": sub.get("cover", {}).get("url"),
         "slug": sub.get("detailPath"),
-        "subject_id": sub.get("subjectId")
+        "subject_id": sub.get("subjectId"),
+        "description": sub.get("description", ""),
+        "genre": sub.get("genre", ""),
+        "language": sub.get("corner", ""),
+        "rating": sub.get("imdbRatingValue", ""),
+        "year": sub.get("releaseDate", "")[:4] if sub.get("releaseDate") else "",
+        "country": sub.get("countryName", "")
     } for sub in raw]
+    # Validate search results — remove items with no valid detail page
+    items = await _validate_items(items)
     pager = inner.get("pager", {})
     total = pager.get("totalCount") or inner.get("total") or len(items)
     return {"query": q, "page": page, "total": total, "items": items}
