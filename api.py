@@ -386,8 +386,7 @@ async def get_ranking():
     sections = [s for s in sections if s is not None]
     return {"status": "success", "sections": sections}
 
-async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, detail_path: str, se: int, ep: int, token: str = "") -> dict | None:
-    # Multiple target configurations with specific headers per domain
+async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, detail_path: str, se: int, ep: int, token: str = ""):
     targets = [
         {
             "url": f"https://h5.aoneroom.com/wefeed-h5-bff/web/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}",
@@ -416,17 +415,20 @@ async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, det
         }
     ]
     
+    attempts = []
     for target in targets:
         try:
             resp = await client.get(target["url"], headers=target["headers"], timeout=8)
+            attempts.append({"url": target["url"].split("?")[0], "status": resp.status_code, "text": resp.text[:100]})
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
                 streams = [s for s in data.get("streams", []) if s.get("url")]
                 if streams or data.get("hasResource"):
-                    return data
-        except Exception:
+                    return data, attempts
+        except Exception as err:
+            attempts.append({"url": target["url"].split("?")[0], "error": str(err)})
             continue
-    return None
+    return None, attempts
 
 # ----------------------------------------------------
 # 📌 ফিক্স করা স্ট্রিমিং এন্ডপয়েন্ট (Multi-Domain Direct MP4 Stream)
@@ -435,15 +437,18 @@ async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, det
 async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 0, ep: int = 0):
     token = await _get_bearer_token()
     data = None
+    all_attempts = []
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
         # Attempt 1: Requested (se, ep)
-        data = await _fetch_raw_stream_data(client, subject_id, detail_path, se, ep, token)
+        data, att1 = await _fetch_raw_stream_data(client, subject_id, detail_path, se, ep, token)
+        all_attempts.extend(att1)
         
         # Attempt 2: Smart fallback (0,0) <-> (1,1) if no stream sources found
         if not data or not [s for s in data.get("streams", []) if s.get("url")]:
             fallback_se, fallback_ep = (1, 1) if (se == 0 and ep == 0) else (0, 0)
-            fallback_data = await _fetch_raw_stream_data(client, subject_id, detail_path, fallback_se, fallback_ep, token)
+            fallback_data, att2 = await _fetch_raw_stream_data(client, subject_id, detail_path, fallback_se, fallback_ep, token)
+            all_attempts.extend(att2)
             if fallback_data and [s for s in fallback_data.get("streams", []) if s.get("url")]:
                 data = fallback_data
                 se, ep = fallback_se, fallback_ep
@@ -459,7 +464,8 @@ async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 0
             "dash": [],
             "free_episodes": None,
             "limited": False,
-            "note": "No stream found for this selection."
+            "note": "No stream found for this selection.",
+            "debug_attempts": all_attempts
         }
 
     has_resource = data.get("hasResource", False)
@@ -485,7 +491,8 @@ async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 0
         "dash": data.get("dash", []),
         "free_episodes": data.get("freeNum"),
         "limited": data.get("limited", False),
-        "note": None if (has_resource or len(streams) > 0) else "No stream found for this selection."
+        "note": None if (has_resource or len(streams) > 0) else "No stream found for this selection.",
+        "debug_attempts": all_attempts
     }
 
 @app.get("/api/stream/{subject_id}/captions")
