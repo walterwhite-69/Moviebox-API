@@ -483,27 +483,105 @@ async def get_movie_detail(slug: str):
     url = f"{API_BASE}/detail?detailPath={slug}"
     return await _make_request(url)
 
+@app.get("/ranking")
+async def get_ranking():
+    url = f"{API_BASE}/ranking-list"
+    data = await _make_request(url)
+    ranking_list = data.get("data", {}).get("rankingList", []) or []
+    
+    async def fetch_rank_movies(rank):
+        rank_id = rank.get("id")
+        rank_name = rank.get("name")
+        if not rank_id:
+            return None
+        try:
+            rank_data = await _make_request(f"{API_BASE}/ranking-list?id={rank_id}")
+            raw_subjects = rank_data.get("data", {}).get("subjectList", []) or []
+            movies = [{
+                "name": sub.get("title"),
+                "poster_url": sub.get("cover", {}).get("url") if sub.get("cover") else None,
+                "slug": sub.get("detailPath"),
+                "subject_id": str(sub.get("subjectId", "") or ""),
+                "badge": sub.get("corner"),
+                "rating": sub.get("imdbRatingValue"),
+                "year": sub.get("releaseDate", "")[:4] if sub.get("releaseDate") else None
+            } for sub in raw_subjects]
+            return {
+                "section": rank_name,
+                "count": len(movies),
+                "items": movies,
+                "movies": movies
+            }
+        except Exception:
+            return None
+
+    tasks = [fetch_rank_movies(rank) for rank in ranking_list]
+    sections = await asyncio.gather(*tasks)
+    sections = [s for s in sections if s is not None]
+    return {"status": "success", "sections": sections}
+
+async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, detail_path: str, se: int, ep: int, token: str = "") -> dict | None:
+    urls = [
+        f"https://h5.aoneroom.com/wefeed-h5-bff/web/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}",
+        f"https://netfilm.world/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}",
+        f"https://h5-api.aoneroom.com/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}",
+    ]
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Origin": "https://netfilm.world",
+        "Referer": f"https://netfilm.world/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en",
+        "Authorization": f"Bearer {token}" if token else ""
+    }
+    
+    for url in urls:
+        try:
+            resp = await client.get(url, headers=headers, timeout=8)
+            if resp.status_code == 200:
+                data = resp.json().get("data", {})
+                streams = [s for s in data.get("streams", []) if s.get("url")]
+                if streams or data.get("hasResource"):
+                    return data
+        except Exception:
+            continue
+    return None
+
 # ----------------------------------------------------
-# 📌 ফিক্স করা স্ট্রিমিং এন্ডপয়েন্ট (Aoneroom Direct MP4 Stream)
+# 📌 ফিক্স করা স্ট্রিমিং এন্ডপয়েন্ট (Multi-Domain Direct MP4 Stream)
 # ----------------------------------------------------
 @app.get("/api/stream/{subject_id}")
 async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 0, ep: int = 0):
-    # আপনার রিকমেন্ড করা ওয়ার্কিং পাথ
-    play_url = f"{STREAM_BASE}/web/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
-    
-    player_referer = f"https://h5.aoneroom.com/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
+    token = await _get_bearer_token()
+    data = None
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
-        resp = await client.get(play_url, headers={**PLAYER_HEADERS, "Referer": player_referer})
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+        # Attempt 1: Requested (se, ep)
+        data = await _fetch_raw_stream_data(client, subject_id, detail_path, se, ep, token)
         
-        if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail="Stream service unavailable")
-            
-        res_json = resp.json()
-        data = res_json.get("data", {})
+        # Attempt 2: Smart fallback (0,0) <-> (1,1) if no stream sources found
+        if not data or not [s for s in data.get("streams", []) if s.get("url")]:
+            fallback_se, fallback_ep = (1, 1) if (se == 0 and ep == 0) else (0, 0)
+            fallback_data = await _fetch_raw_stream_data(client, subject_id, detail_path, fallback_se, fallback_ep, token)
+            if fallback_data and [s for s in fallback_data.get("streams", []) if s.get("url")]:
+                data = fallback_data
+                se, ep = fallback_se, fallback_ep
+
+    if not data:
+        return {
+            "subject_id": subject_id,
+            "se": se,
+            "ep": ep,
+            "has_resource": False,
+            "sources": [],
+            "hls": [],
+            "dash": [],
+            "free_episodes": None,
+            "limited": False,
+            "note": "No stream found for this selection."
+        }
 
     has_resource = data.get("hasResource", False)
-    
     streams = [
         {
             "resolution": f"{s.get('resolutions')}p" if s.get('resolutions') else "HD",
@@ -531,15 +609,21 @@ async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 0
 
 @app.get("/api/stream/{subject_id}/captions")
 async def get_captions(subject_id: str, detail_path: str = "", se: int = 0, ep: int = 0):
-    play_url = f"{STREAM_BASE}/web/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
-    player_referer = f"https://h5.aoneroom.com/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en"
+    token = await _get_bearer_token()
+    data = None
+    async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+        data = await _fetch_raw_stream_data(client, subject_id, detail_path, se, ep, token)
+        if not data:
+            fallback_se, fallback_ep = (1, 1) if (se == 0 and ep == 0) else (0, 0)
+            data = await _fetch_raw_stream_data(client, subject_id, detail_path, fallback_se, fallback_ep, token)
+            if data:
+                se, ep = fallback_se, fallback_ep
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
-        play_resp = await client.get(play_url, headers={**PLAYER_HEADERS, "Referer": player_referer})
-        play_data = play_resp.json().get("data", {})
+    if not data:
+        return {"subject_id": subject_id, "se": se, "ep": ep, "count": 0, "captions": []}
 
-    streams = play_data.get("streams", [])
-    dash = play_data.get("dash", [])
+    streams = data.get("streams", [])
+    dash = data.get("dash", [])
 
     stream_id = None
     stream_format = None
@@ -557,10 +641,13 @@ async def get_captions(subject_id: str, detail_path: str = "", se: int = 0, ep: 
         f"{API_BASE}/subject/caption"
         f"?format={stream_format}&id={stream_id}&subjectId={subject_id}&detailPath={detail_path}"
     )
-    data = await _make_request(cap_url)
-    inner = data.get("data", {})
-    captions = inner.get("captions", []) if isinstance(inner, dict) else inner
-    return {"subject_id": subject_id, "se": se, "ep": ep, "count": len(captions), "captions": captions}
+    try:
+        data = await _make_request(cap_url)
+        inner = data.get("data", {})
+        captions = inner.get("captions", []) if isinstance(inner, dict) else inner
+        return {"subject_id": subject_id, "se": se, "ep": ep, "count": len(captions), "captions": captions}
+    except Exception:
+        return {"subject_id": subject_id, "se": se, "ep": ep, "count": 0, "captions": []}
 
 if __name__ == "__main__":
     import uvicorn
