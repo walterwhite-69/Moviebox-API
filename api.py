@@ -21,8 +21,6 @@ app.add_middleware(
 
 BASE_URL = "https://moviebox.ph"
 API_BASE = "https://h5-api.aoneroom.com/wefeed-h5api-bff"
-
-# আপডেট করা সঠিক স্ট্রিমিং বেস ইউআরএল
 STREAM_BASE = "https://h5.aoneroom.com/wefeed-h5-bff"
 
 _bearer_token: str | None = None
@@ -43,28 +41,7 @@ DEFAULT_HEADERS = {
     "sec-fetch-site": "cross-site",
 }
 
-PLAYER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Origin": "https://h5.aoneroom.com",
-    "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-}
-
 # ── Content Validation Helpers ──────────────────────────────────────
-# These check whether a given slug actually has a valid detail response
-# (not 404, not premium-only) so we can filter out unavailable content
-# before sending results to the Roku client.
-#
-# Performance: Uses a concurrency semaphore (max 5 parallel), an
-# in-memory cache (TTL 10 min), and a batch timeout (15s) to avoid
-# blocking the Roku loading screen.
-
 import time as _time
 
 _slug_cache: dict[str, tuple[bool, float]] = {}   # slug -> (is_valid, timestamp)
@@ -77,7 +54,6 @@ async def _validate_slug(slug: str, client: httpx.AsyncClient, token: str) -> bo
     if not slug:
         return False
 
-    # Check cache first
     cached = _slug_cache.get(slug)
     if cached:
         is_valid, ts = cached
@@ -115,8 +91,7 @@ async def _validate_slug(slug: str, client: httpx.AsyncClient, token: str) -> bo
 
 
 async def _validate_items(items: list) -> list:
-    """Filter a list of items, keeping only those with valid detail slugs.
-    Uses a shared client, semaphore for concurrency control, and a batch timeout."""
+    """Filter a list of items, keeping only those with valid detail slugs."""
     if not items:
         return items
 
@@ -143,8 +118,6 @@ async def _validate_items(items: list) -> list:
         return valid_items
 
     try:
-        # Total batch timeout — if validation takes too long, return all items
-        # rather than blocking the Roku loading screen forever
         return await asyncio.wait_for(_do_validation(), timeout=15.0)
     except asyncio.TimeoutError:
         print("[VALIDATE] Batch validation timed out, returning all items unfiltered")
@@ -216,132 +189,34 @@ async def dashboard():
                 --glass: rgba(255, 255, 255, 0.06);
                 --text: #ffffff;
             }
-
             * { margin: 0; padding: 0; box-sizing: border-box; }
-            
             body {
                 font-family: 'Outfit', sans-serif;
                 background: var(--bg);
                 color: var(--text);
-                overflow-x: hidden;
                 min-height: 100vh;
                 background-image: 
                     radial-gradient(circle at 10% 10%, rgba(255, 61, 113, 0.12) 0%, transparent 40%),
                     radial-gradient(circle at 90% 90%, rgba(51, 102, 255, 0.12) 0%, transparent 40%);
             }
-
-            .container {
-                max-width: 1200px;
-                margin: 0 auto;
-                padding: 60px 24px;
-                position: relative;
-            }
-
-            header {
-                text-align: center;
-                margin-bottom: 80px;
-            }
-
-            h1 {
-                font-size: clamp(2.5rem, 8vw, 4rem);
-                font-weight: 800;
-                background: linear-gradient(135deg, #fff 0%, #aaa 100%);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-                margin-bottom: 15px;
-                letter-spacing: -2px;
-            }
-
-            .badge {
-                background: linear-gradient(90deg, var(--primary), var(--secondary));
-                padding: 8px 18px;
-                border-radius: 40px;
-                font-size: 0.85rem;
-                font-weight: 700;
-                display: inline-block;
-                margin-bottom: 25px;
-                text-transform: uppercase;
-                letter-spacing: 1px;
-                box-shadow: 0 10px 30px rgba(255, 61, 113, 0.3);
-            }
-
-            .grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-                gap: 30px;
-                margin-top: 20px;
-            }
-
-            .card {
-                background: var(--card-bg);
-                border: 1px solid var(--glass);
-                border-radius: 28px;
-                padding: 35px;
-                backdrop-filter: blur(12px);
-                display: flex;
-                flex-direction: column;
-            }
-
-            .card-title {
-                font-size: 1.5rem;
-                font-weight: 700;
-                margin-bottom: 18px;
-                display: flex;
-                align-items: center;
-                gap: 12px;
-            }
-
-            .card-desc {
-                color: #9ea3ac;
-                font-size: 1rem;
-                line-height: 1.6;
-                margin-bottom: 25px;
-                flex-grow: 1;
-            }
-
-            .endpoint {
-                font-family: 'JetBrains Mono', monospace;
-                background: rgba(0,0,0,0.4);
-                padding: 14px;
-                border-radius: 14px;
-                font-size: 0.85rem;
-                color: var(--accent);
-                border: 1px solid rgba(0,242,255,0.15);
-                margin-bottom: 25px;
-                word-break: break-all;
-            }
-
-            .btn {
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                padding: 16px;
-                background: #ffffff;
-                color: #000000;
-                text-decoration: none;
-                border-radius: 16px;
-                font-weight: 700;
-                font-size: 0.95rem;
-                transition: all 0.3s;
-            }
-
-            .btn:hover {
-                background: var(--primary);
-                color: #fff;
-            }
-
-            footer { text-align: center; padding: 80px 0 40px; }
-            .dev-tag { font-weight: 800; color: #666; font-size: 0.75rem; border: 1px solid #222; padding: 12px 30px; border-radius: 50px; display: inline-block; }
+            .container { max-width: 1200px; margin: 0 auto; padding: 60px 24px; }
+            header { text-align: center; margin-bottom: 80px; }
+            h1 { font-size: clamp(2.5rem, 8vw, 4rem); font-weight: 800; }
+            .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 30px; margin-top: 20px; }
+            .card { background: var(--card-bg); border: 1px solid var(--glass); border-radius: 28px; padding: 35px; backdrop-filter: blur(12px); display: flex; flex-direction: column; }
+            .card-title { font-size: 1.5rem; font-weight: 700; margin-bottom: 18px; }
+            .card-desc { color: #9ea3ac; font-size: 1rem; line-height: 1.6; margin-bottom: 25px; flex-grow: 1; }
+            .endpoint { font-family: 'JetBrains Mono', monospace; background: rgba(0,0,0,0.4); padding: 14px; border-radius: 14px; font-size: 0.85rem; color: var(--accent); border: 1px solid rgba(0,242,255,0.15); margin-bottom: 25px; word-break: break-all; }
+            .btn { display: flex; align-items: center; justify-content: center; padding: 16px; background: #ffffff; color: #000000; text-decoration: none; border-radius: 16px; font-weight: 700; font-size: 0.95rem; }
+            .btn:hover { background: var(--primary); color: #fff; }
         </style>
     </head>
     <body>
         <div class="container">
             <header>
-                <div class="badge">Enterprise API Solution v2.2.0</div>
                 <h1>MovieBox Pro</h1>
-                <p style="color: #667; font-size: 1.25rem; font-weight: 300;">Direct Stream Extraction API</p>
+                <p style="color: #667; font-size: 1.25rem;">Direct Stream Extraction API</p>
             </header>
-
             <div class="grid">
                 <div class="card">
                     <div class="card-title">🏠 Discover Home</div>
@@ -349,25 +224,19 @@ async def dashboard():
                     <div class="endpoint">/home</div>
                     <a href="/home" target="_blank" class="btn">Launch API</a>
                 </div>
-
                 <div class="card">
-                    <div class="card-title">🔍 Smart Search</div>
-                    <p class="card-desc">High-precision search engine results.</p>
-                    <div class="endpoint">/search?q=Attack on Titan</div>
-                    <a href="/search?q=Attack on Titan" target="_blank" class="btn">Test Search</a>
+                    <div class="card-title">🏆 Rankings</div>
+                    <p class="card-desc">Top rated, most watched charts.</p>
+                    <div class="endpoint">/ranking</div>
+                    <a href="/ranking" target="_blank" class="btn">View Rankings</a>
                 </div>
-
                 <div class="card">
                     <div class="card-title">🎬 Direct Stream Engine</div>
-                    <p class="card-desc">Working direct MP4 CDN links from aoneroom.com (Supports 360p - 1080p).</p>
-                    <div class="endpoint">/api/stream/{subject_id}?se=0&ep=0</div>
-                    <a href="/api/stream/56988683026712168?detail_path=attack-on-titan-hindi-kGWQOIx0d4&se=0&ep=0" target="_blank" class="btn">Get Direct MP4 Links</a>
+                    <p class="card-desc">Working direct MP4 CDN links (Supports 360p - 1080p).</p>
+                    <div class="endpoint">/api/stream/{subject_id}?se=1&ep=1</div>
+                    <a href="/api/stream/56988683026712168?detail_path=attack-on-titan-hindi-kGWQOIx0d4&se=1&ep=1" target="_blank" class="btn">Test Streams</a>
                 </div>
             </div>
-
-            <footer>
-                <div class="dev-tag">Developer: Walter</div>
-            </footer>
         </div>
     </body>
     </html>
@@ -390,7 +259,6 @@ async def get_home():
                 "subject_id": (item.get("subject") or {}).get("subjectId"),
                 "badge": (item.get("subject") or {}).get("corner")
             } for item in op.get("banner", {}).get("items", []) if item.get("title") and "Communities" not in item.get("title")]
-            # Validate banner items — remove those with no valid detail page
             items = await _validate_items(items)
             sections.append({"section": "Banner", "count": len(items), "items": items})
         elif op_type in ["SUBJECTS_MOVIE", "SUBJECTS_TV", "SUBJECTS_ANIMATION"]:
@@ -402,7 +270,6 @@ async def get_home():
                 "badge": sub.get("corner"),
                 "rating": sub.get("imdbRatingValue")
             } for sub in op.get("subjects", [])]
-            # Validate section items — remove those with no valid detail page
             items = await _validate_items(items)
             sections.append({"section": title, "count": len(items), "items": items})
     return {"status": "success", "sections": sections}
@@ -472,7 +339,6 @@ async def search(q: str = Query(..., min_length=1), page: int = 1):
         "year": sub.get("releaseDate", "")[:4] if sub.get("releaseDate") else "",
         "country": sub.get("countryName", "")
     } for sub in raw]
-    # Validate search results — remove items with no valid detail page
     items = await _validate_items(items)
     pager = inner.get("pager", {})
     total = pager.get("totalCount") or inner.get("total") or len(items)
@@ -521,23 +387,38 @@ async def get_ranking():
     return {"status": "success", "sections": sections}
 
 async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, detail_path: str, se: int, ep: int, token: str = "") -> dict | None:
-    urls = [
-        f"https://h5.aoneroom.com/wefeed-h5-bff/web/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}",
-        f"https://netfilm.world/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}",
-        f"https://h5-api.aoneroom.com/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}",
+    # Multiple target configurations with specific headers per domain
+    targets = [
+        {
+            "url": f"https://h5.aoneroom.com/wefeed-h5-bff/web/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}",
+            "headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Origin": "https://h5.aoneroom.com",
+                "Referer": f"https://h5.aoneroom.com/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en",
+            }
+        },
+        {
+            "url": f"https://netfilm.world/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}",
+            "headers": {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Origin": "https://netfilm.world",
+                "Referer": f"https://netfilm.world/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en",
+            }
+        },
+        {
+            "url": f"https://h5-api.aoneroom.com/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}",
+            "headers": {
+                **DEFAULT_HEADERS,
+                "Authorization": f"Bearer {token}" if token else ""
+            }
+        }
     ]
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Origin": "https://netfilm.world",
-        "Referer": f"https://netfilm.world/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en",
-        "Authorization": f"Bearer {token}" if token else ""
-    }
-    
-    for url in urls:
+    for target in targets:
         try:
-            resp = await client.get(url, headers=headers, timeout=8)
+            resp = await client.get(target["url"], headers=target["headers"], timeout=8)
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
                 streams = [s for s in data.get("streams", []) if s.get("url")]
