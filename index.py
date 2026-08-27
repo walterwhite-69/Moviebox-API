@@ -8,8 +8,8 @@ from fastapi.responses import HTMLResponse
 
 app = FastAPI(
     title="MovieBox API Pro",
-    description="Full Pure REST API for moviebox.ph — Fixed Streaming Endpoint",
-    version="2.2.0"
+    description="Full Pure REST API for moviebox.ph — Multi-Language & Direct Stream Extraction",
+    version="2.3.0"
 )
 
 app.add_middleware(
@@ -43,6 +43,17 @@ DEFAULT_HEADERS = {
     "sec-fetch-mode": "cors",
     "sec-fetch-site": "cross-site",
 }
+
+def _extract_language_badge(title: str, corner: str = "") -> str:
+    """Extract language/dubbing badge from corner or title [Language]."""
+    if corner and corner.strip():
+        return corner.strip()
+    if not title:
+        return ""
+    m = re.search(r"\[(.*?)\]", title)
+    if m:
+        return m.group(1).strip()
+    return ""
 
 # ── Content Validation Helpers ──────────────────────────────────────
 import time as _time
@@ -218,12 +229,12 @@ async def dashboard():
         <div class="container">
             <header>
                 <h1>MovieBox Pro</h1>
-                <p style="color: #667; font-size: 1.25rem;">Direct Stream Extraction API</p>
+                <p style="color: #667; font-size: 1.25rem;">Multi-Language Direct Stream Extraction API</p>
             </header>
             <div class="grid">
                 <div class="card">
-                    <div class="card-title">🏠 Discover Home</div>
-                    <p class="card-desc">Headlines, recommended content, and trending blocks.</p>
+                    <div class="card-title">🏠 Multi-Language Home</div>
+                    <p class="card-desc">Headlines, Tagalog Dubbed, Hindi Dubbed, Anime & Trending blocks.</p>
                     <div class="endpoint">/home</div>
                     <a href="/home" target="_blank" class="btn">Launch API</a>
                 </div>
@@ -248,38 +259,110 @@ async def dashboard():
 
 @app.get("/home")
 async def get_home():
-    url = f"{API_BASE}/home?host=moviebox.ph"
-    data = await _make_request(url)
-    sections = []
-    for op in data.get("data", {}).get("operatingList", []) or []:
-        op_type = op.get("type")
-        title = op.get("title", "Featured")
-        if op_type == "BANNER":
-            items = [{
-                "name": item.get("title") or (item.get("subject") or {}).get("title"),
-                "poster_url": item.get("image", {}).get("url") or (item.get("subject") or {}).get("cover", {}).get("url"),
-                "slug": item.get("detailPath") or (item.get("subject") or {}).get("detailPath"),
-                "subject_id": (item.get("subject") or {}).get("subjectId"),
-                "badge": (item.get("subject") or {}).get("corner")
-            } for item in op.get("banner", {}).get("items", []) if item.get("title") and "Communities" not in item.get("title")]
-            items = await _validate_items(items)
-            sections.append({"section": "Banner", "count": len(items), "items": items})
-        elif op_type in ["SUBJECTS_MOVIE", "SUBJECTS_TV", "SUBJECTS_ANIMATION"]:
-            items = [{
-                "name": sub.get("title"),
-                "poster_url": sub.get("cover", {}).get("url"),
-                "slug": sub.get("detailPath"),
-                "subject_id": sub.get("subjectId"),
-                "badge": sub.get("corner"),
-                "rating": sub.get("imdbRatingValue")
-            } for sub in op.get("subjects", [])]
-            items = await _validate_items(items)
-            sections.append({"section": title, "count": len(items), "items": items})
-    return {"status": "success", "sections": sections}
+    """Returns rich Home & Explore sections including Tagalog Dubbed, Hindi Dubbed, Movies, Series & Anime."""
+    token = await _get_bearer_token()
+    headers = {
+        **DEFAULT_HEADERS,
+        "Authorization": f"Bearer {token}" if token else ""
+    }
 
-async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sort: str = "RECOMMEND") -> dict:
+    async with httpx.AsyncClient(follow_redirects=True, timeout=12) as client:
+        async def fetch_home_base():
+            try:
+                res = await client.get(f"{API_BASE}/home?host=moviebox.ph", headers=headers)
+                if res.status_code != 200: return []
+                sections = []
+                for op in res.json().get("data", {}).get("operatingList", []) or []:
+                    op_type = op.get("type")
+                    title = op.get("title", "Featured")
+                    if op_type == "BANNER":
+                        items = [{
+                            "name": item.get("title") or (item.get("subject") or {}).get("title"),
+                            "poster_url": item.get("image", {}).get("url") or (item.get("subject") or {}).get("cover", {}).get("url"),
+                            "slug": item.get("detailPath") or (item.get("subject") or {}).get("detailPath"),
+                            "subject_id": (item.get("subject") or {}).get("subjectId"),
+                            "badge": _extract_language_badge(item.get("title"), (item.get("subject") or {}).get("corner"))
+                        } for item in op.get("banner", {}).get("items", []) if item.get("title") and "Communities" not in item.get("title")]
+                        sections.append({"section": "Banner", "count": len(items), "items": items})
+                    elif op_type in ["SUBJECTS_MOVIE", "SUBJECTS_TV", "SUBJECTS_ANIMATION"]:
+                        items = [{
+                            "name": sub.get("title"),
+                            "poster_url": sub.get("cover", {}).get("url"),
+                            "slug": sub.get("detailPath"),
+                            "subject_id": sub.get("subjectId"),
+                            "badge": _extract_language_badge(sub.get("title"), sub.get("corner")),
+                            "rating": sub.get("imdbRatingValue")
+                        } for sub in op.get("subjects", [])]
+                        sections.append({"section": title, "count": len(items), "items": items})
+                return sections
+            except Exception:
+                return []
+
+        async def fetch_search_row(title: str, keyword: str):
+            try:
+                res = await client.post(f"{API_BASE}/subject/search", headers=headers, json={"keyword": keyword, "page": 1, "perPage": 18})
+                if res.status_code != 200: return None
+                raw = res.json().get("data", {}).get("items", [])
+                items = [{
+                    "name": sub.get("title"),
+                    "poster_url": sub.get("cover", {}).get("url"),
+                    "slug": sub.get("detailPath"),
+                    "subject_id": sub.get("subjectId"),
+                    "badge": _extract_language_badge(sub.get("title"), sub.get("corner")) or keyword.strip("[]"),
+                    "rating": sub.get("imdbRatingValue"),
+                    "description": sub.get("description", ""),
+                    "genre": sub.get("genre", ""),
+                    "year": sub.get("releaseDate", "")[:4] if sub.get("releaseDate") else ""
+                } for sub in raw]
+                if items:
+                    return {"section": title, "count": len(items), "items": items}
+            except Exception:
+                pass
+            return None
+
+        async def fetch_category_row(title: str, tab_id: int):
+            try:
+                res = await client.post(f"{API_BASE}/subject/filter", headers=headers, json={"tabId": tab_id, "filter": {"sort": "RECOMMEND", "genre": "ALL", "country": "ALL", "year": "ALL", "language": "ALL"}, "page": 1, "perPage": 18})
+                if res.status_code != 200: return None
+                raw = res.json().get("data", {}).get("items", [])
+                items = [{
+                    "name": sub.get("title"),
+                    "poster_url": sub.get("cover", {}).get("url"),
+                    "slug": sub.get("detailPath"),
+                    "subject_id": sub.get("subjectId"),
+                    "badge": _extract_language_badge(sub.get("title"), sub.get("corner")),
+                    "rating": sub.get("imdbRatingValue"),
+                    "year": sub.get("releaseDate", "")[:4] if sub.get("releaseDate") else ""
+                } for sub in raw]
+                if items:
+                    return {"section": title, "count": len(items), "items": items}
+            except Exception:
+                pass
+            return None
+
+        # Execute parallel section gathering for speed
+        results = await asyncio.gather(
+            fetch_home_base(),
+            fetch_search_row("Tagalog Dubbed Series & Movies", "[Tagalog]"),
+            fetch_search_row("Hindi Dubbed Blockbusters", "[Hindi]"),
+            fetch_category_row("Top TV Series", 5),
+            fetch_category_row("Popular Movies", 2),
+            fetch_category_row("Anime & Animation", 8),
+            fetch_search_row("Asian & Korean Dramas", "Korean Drama")
+        )
+
+        all_sections = []
+        if results[0]:
+            all_sections.extend(results[0])
+        for sec in results[1:]:
+            if sec and sec.get("count", 0) > 0:
+                all_sections.append(sec)
+
+    return {"status": "success", "sections": all_sections}
+
+async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sort: str = "RECOMMEND", language: str = "ALL") -> dict:
     url = f"{API_BASE}/subject/filter"
-    payload = {"tabId": tab_id, "filter": {"sort": sort, "genre": "ALL", "country": "ALL", "year": "ALL", "language": "ALL"}, "page": page, "perPage": per_page}
+    payload = {"tabId": tab_id, "filter": {"sort": sort, "genre": "ALL", "country": "ALL", "year": "ALL", "language": language}, "page": page, "perPage": per_page}
     data = await _make_request(url, method="POST", payload=payload)
     inner = data.get("data", {})
     raw_items = inner.get("items", inner.get("subjects", []))
@@ -288,7 +371,7 @@ async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sor
         "poster_url": sub.get("cover", {}).get("url"),
         "slug": sub.get("detailPath"),
         "subject_id": sub.get("subjectId"),
-        "badge": sub.get("corner"),
+        "badge": _extract_language_badge(sub.get("title"), sub.get("corner")),
         "rating": sub.get("imdbRatingValue"),
         "year": sub.get("releaseDate", "")[:4] if sub.get("releaseDate") else None
     } for sub in raw_items]
@@ -297,16 +380,16 @@ async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sor
     return {"page": page, "per_page": per_page, "total": total, "items": items}
 
 @app.get("/movies")
-async def get_movies(page: int = 1, sort: str = "RECOMMEND"):
-    return await _get_category_data(tab_id=2, page=page, sort=sort)
+async def get_movies(page: int = 1, sort: str = "RECOMMEND", language: str = "ALL"):
+    return await _get_category_data(tab_id=2, page=page, sort=sort, language=language)
 
 @app.get("/tv-series")
-async def get_tv_series(page: int = 1, sort: str = "RECOMMEND"):
-    return await _get_category_data(tab_id=5, page=page, sort=sort)
+async def get_tv_series(page: int = 1, sort: str = "RECOMMEND", language: str = "ALL"):
+    return await _get_category_data(tab_id=5, page=page, sort=sort, language=language)
 
 @app.get("/animation")
-async def get_animation(page: int = 1, sort: str = "RECOMMEND"):
-    return await _get_category_data(tab_id=8, page=page, sort=sort)
+async def get_animation(page: int = 1, sort: str = "RECOMMEND", language: str = "ALL"):
+    return await _get_category_data(tab_id=8, page=page, sort=sort, language=language)
 
 @app.get("/search/suggest")
 async def get_search_suggestions(q: str = Query(..., min_length=1)):
@@ -337,7 +420,8 @@ async def search(q: str = Query(..., min_length=1), page: int = 1):
         "subject_id": sub.get("subjectId"),
         "description": sub.get("description", ""),
         "genre": sub.get("genre", ""),
-        "language": sub.get("corner", ""),
+        "language": _extract_language_badge(sub.get("title"), sub.get("corner")),
+        "badge": _extract_language_badge(sub.get("title"), sub.get("corner")),
         "rating": sub.get("imdbRatingValue", ""),
         "year": sub.get("releaseDate", "")[:4] if sub.get("releaseDate") else "",
         "country": sub.get("countryName", "")
@@ -371,7 +455,7 @@ async def get_ranking():
                 "poster_url": sub.get("cover", {}).get("url") if sub.get("cover") else None,
                 "slug": sub.get("detailPath"),
                 "subject_id": str(sub.get("subjectId", "") or ""),
-                "badge": sub.get("corner"),
+                "badge": _extract_language_badge(sub.get("title"), sub.get("corner")),
                 "rating": sub.get("imdbRatingValue"),
                 "year": sub.get("releaseDate", "")[:4] if sub.get("releaseDate") else None
             } for sub in raw_subjects]
