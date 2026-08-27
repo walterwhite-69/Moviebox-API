@@ -31,6 +31,9 @@ DEFAULT_HEADERS = {
     "Origin": "https://moviebox.ph",
     "X-Client-Info": '{"timezone":"Asia/Dhaka"}',
     "X-Request-Lang": "en",
+    "X-Forwarded-For": "119.92.128.1",
+    "X-Real-IP": "119.92.128.1",
+    "CF-IPCountry": "PH",
     "Accept": "application/json",
     "Content-Type": "application/json",
     "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
@@ -393,8 +396,11 @@ async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, det
             "headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/plain, */*",
-                "Origin": "https://h5.aoneroom.com",
-                "Referer": f"https://h5.aoneroom.com/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en",
+                "Origin": "https://netfilm.world",
+                "Referer": f"https://netfilm.world/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en",
+                "X-Forwarded-For": "119.92.128.1",
+                "X-Real-IP": "119.92.128.1",
+                "CF-IPCountry": "PH"
             }
         },
         {
@@ -404,6 +410,9 @@ async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, det
                 "Accept": "application/json, text/plain, */*",
                 "Origin": "https://netfilm.world",
                 "Referer": f"https://netfilm.world/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en",
+                "X-Forwarded-For": "119.92.128.1",
+                "X-Real-IP": "119.92.128.1",
+                "CF-IPCountry": "PH"
             }
         },
         {

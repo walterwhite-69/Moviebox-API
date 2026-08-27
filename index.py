@@ -31,6 +31,9 @@ DEFAULT_HEADERS = {
     "Origin": "https://moviebox.ph",
     "X-Client-Info": '{"timezone":"Asia/Dhaka"}',
     "X-Request-Lang": "en",
+    "X-Forwarded-For": "119.92.128.1",
+    "X-Real-IP": "119.92.128.1",
+    "CF-IPCountry": "PH",
     "Accept": "application/json",
     "Content-Type": "application/json",
     "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
@@ -386,15 +389,18 @@ async def get_ranking():
     sections = [s for s in sections if s is not None]
     return {"status": "success", "sections": sections}
 
-async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, detail_path: str, se: int, ep: int, token: str = ""):
+async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, detail_path: str, se: int, ep: int, token: str = "") -> dict | None:
     targets = [
         {
             "url": f"https://h5.aoneroom.com/wefeed-h5-bff/web/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}",
             "headers": {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
                 "Accept": "application/json, text/plain, */*",
-                "Origin": "https://h5.aoneroom.com",
-                "Referer": f"https://h5.aoneroom.com/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en",
+                "Origin": "https://netfilm.world",
+                "Referer": f"https://netfilm.world/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en",
+                "X-Forwarded-For": "119.92.128.1",
+                "X-Real-IP": "119.92.128.1",
+                "CF-IPCountry": "PH"
             }
         },
         {
@@ -404,6 +410,9 @@ async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, det
                 "Accept": "application/json, text/plain, */*",
                 "Origin": "https://netfilm.world",
                 "Referer": f"https://netfilm.world/spa/videoPlayPage/movies/{detail_path}?id={subject_id}&type=/movie/detail&detailSe={se}&detailEp={ep}&lang=en",
+                "X-Forwarded-For": "119.92.128.1",
+                "X-Real-IP": "119.92.128.1",
+                "CF-IPCountry": "PH"
             }
         },
         {
@@ -415,20 +424,17 @@ async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, det
         }
     ]
     
-    attempts = []
     for target in targets:
         try:
             resp = await client.get(target["url"], headers=target["headers"], timeout=8)
-            attempts.append({"url": target["url"].split("?")[0], "status": resp.status_code, "text": resp.text[:100]})
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
                 streams = [s for s in data.get("streams", []) if s.get("url")]
                 if streams or data.get("hasResource"):
-                    return data, attempts
-        except Exception as err:
-            attempts.append({"url": target["url"].split("?")[0], "error": str(err)})
+                    return data
+        except Exception:
             continue
-    return None, attempts
+    return None
 
 # ----------------------------------------------------
 # 📌 ফিক্স করা স্ট্রিমিং এন্ডপয়েন্ট (Multi-Domain Direct MP4 Stream)
@@ -437,18 +443,15 @@ async def _fetch_raw_stream_data(client: httpx.AsyncClient, subject_id: str, det
 async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 0, ep: int = 0):
     token = await _get_bearer_token()
     data = None
-    all_attempts = []
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
         # Attempt 1: Requested (se, ep)
-        data, att1 = await _fetch_raw_stream_data(client, subject_id, detail_path, se, ep, token)
-        all_attempts.extend(att1)
+        data = await _fetch_raw_stream_data(client, subject_id, detail_path, se, ep, token)
         
         # Attempt 2: Smart fallback (0,0) <-> (1,1) if no stream sources found
         if not data or not [s for s in data.get("streams", []) if s.get("url")]:
             fallback_se, fallback_ep = (1, 1) if (se == 0 and ep == 0) else (0, 0)
-            fallback_data, att2 = await _fetch_raw_stream_data(client, subject_id, detail_path, fallback_se, fallback_ep, token)
-            all_attempts.extend(att2)
+            fallback_data = await _fetch_raw_stream_data(client, subject_id, detail_path, fallback_se, fallback_ep, token)
             if fallback_data and [s for s in fallback_data.get("streams", []) if s.get("url")]:
                 data = fallback_data
                 se, ep = fallback_se, fallback_ep
@@ -464,8 +467,7 @@ async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 0
             "dash": [],
             "free_episodes": None,
             "limited": False,
-            "note": "No stream found for this selection.",
-            "debug_attempts": all_attempts
+            "note": "No stream found for this selection."
         }
 
     has_resource = data.get("hasResource", False)
@@ -491,8 +493,7 @@ async def get_stream_sources(subject_id: str, detail_path: str = "", se: int = 0
         "dash": data.get("dash", []),
         "free_episodes": data.get("freeNum"),
         "limited": data.get("limited", False),
-        "note": None if (has_resource or len(streams) > 0) else "No stream found for this selection.",
-        "debug_attempts": all_attempts
+        "note": None if (has_resource or len(streams) > 0) else "No stream found for this selection."
     }
 
 @app.get("/api/stream/{subject_id}/captions")
