@@ -3,7 +3,7 @@ import re
 import json
 import httpx
 import asyncio
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
@@ -77,12 +77,33 @@ async def _get_bearer_token() -> str:
                 _bearer_token = m.group(1)
     return _bearer_token or ""
 
-async def _make_request(url: str, method: str = "GET", payload: dict = None, custom_headers: dict = None) -> dict:
+def _client_ip(request: Request | None) -> str:
+    """Best-effort resolve of the real client IP from proxy headers."""
+    if request is None:
+        return ""
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    real = request.headers.get("x-real-ip")
+    if real:
+        return real.strip()
+    return request.client.host if request.client else ""
+
+
+def _geo_headers(client_ip: str) -> dict:
+    """Forward the caller's IP upstream so the CDN sees a residential client."""
+    if not client_ip:
+        return {}
+    return {"X-Forwarded-For": client_ip, "X-Real-IP": client_ip}
+
+
+async def _make_request(url: str, method: str = "GET", payload: dict = None, custom_headers: dict = None, client_ip: str = "") -> dict:
     global _bearer_token
     token = await _get_bearer_token()
     headers = {
         **DEFAULT_HEADERS,
         "Authorization": f"Bearer {token}" if token else "",
+        **_geo_headers(client_ip),
         **(custom_headers or {})
     }
     async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
@@ -375,9 +396,9 @@ async def dashboard():
     return HTMLResponse(content=html_content)
 
 @app.get("/home")
-async def get_home():
+async def get_home(request: Request):
     url = f"{API_BASE}/home?host=moviebox.ph"
-    data = await _make_request(url)
+    data = await _make_request(url, client_ip=_client_ip(request))
     sections = []
     for op in data.get("data", {}).get("operatingList", []) or []:
         op_type = op.get("type")
@@ -403,10 +424,10 @@ async def get_home():
             sections.append({"section": title, "count": len(items), "items": items})
     return {"status": "success", "sections": sections}
 
-async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sort: str = "RECOMMEND") -> dict:
+async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sort: str = "RECOMMEND", client_ip: str = "") -> dict:
     url = f"{API_BASE}/subject/filter"
     payload = {"tabId": tab_id, "filter": {"sort": sort, "genre": "ALL", "country": "ALL", "year": "ALL", "language": "ALL"}, "page": page, "perPage": per_page}
-    data = await _make_request(url, method="POST", payload=payload)
+    data = await _make_request(url, method="POST", payload=payload, client_ip=client_ip)
     inner = data.get("data", {})
     raw_items = inner.get("items", inner.get("subjects", []))
     items = [{
@@ -423,21 +444,21 @@ async def _get_category_data(tab_id: int, page: int = 1, per_page: int = 24, sor
     return {"page": page, "per_page": per_page, "total": total, "items": items}
 
 @app.get("/movies")
-async def get_movies(page: int = 1, sort: str = "RECOMMEND"):
-    return await _get_category_data(tab_id=2, page=page, sort=sort)
+async def get_movies(request: Request, page: int = 1, sort: str = "RECOMMEND"):
+    return await _get_category_data(tab_id=2, page=page, sort=sort, client_ip=_client_ip(request))
 
 @app.get("/tv-series")
-async def get_tv_series(page: int = 1, sort: str = "RECOMMEND"):
-    return await _get_category_data(tab_id=5, page=page, sort=sort)
+async def get_tv_series(request: Request, page: int = 1, sort: str = "RECOMMEND"):
+    return await _get_category_data(tab_id=5, page=page, sort=sort, client_ip=_client_ip(request))
 
 @app.get("/animation")
-async def get_animation(page: int = 1, sort: str = "RECOMMEND"):
-    return await _get_category_data(tab_id=8, page=page, sort=sort)
+async def get_animation(request: Request, page: int = 1, sort: str = "RECOMMEND"):
+    return await _get_category_data(tab_id=8, page=page, sort=sort, client_ip=_client_ip(request))
 
 @app.get("/search/suggest")
-async def get_search_suggestions(q: str = Query(..., min_length=1)):
+async def get_search_suggestions(request: Request, q: str = Query(..., min_length=1)):
     url = f"{API_BASE}/subject/search-suggest"
-    data = await _make_request(url, method="POST", payload={"keyword": q, "perPage": 10})
+    data = await _make_request(url, method="POST", payload={"keyword": q, "perPage": 10}, client_ip=_client_ip(request))
     inner = data.get("data", {})
     raw = inner.get("items", inner.get("list", []))
     suggestions = []
@@ -467,14 +488,16 @@ async def search(q: str = Query(..., min_length=1), page: int = 1):
     return {"query": q, "page": page, "total": total, "items": items}
 
 @app.get("/detail/{slug}")
-async def get_movie_detail(slug: str):
+async def get_movie_detail(request: Request, slug: str):
     url = f"{API_BASE}/detail?detailPath={slug}"
-    return await _make_request(url)
+    return await _make_request(url, client_ip=_client_ip(request))
 
 @app.get("/api/stream/{subject_id}")
-async def get_stream_sources(subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
+async def get_stream_sources(request: Request, subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
+    client_ip = _client_ip(request)
+
     # Step 1: get the player domain
-    dom_data = await _make_request(f"{API_BASE}/media-player/get-domain")
+    dom_data = await _make_request(f"{API_BASE}/media-player/get-domain", client_ip=client_ip)
     domain = dom_data.get("data", "https://netfilm.world").rstrip("/")
 
     # Step 2: build the Referer the way the real browser player does
@@ -485,7 +508,7 @@ async def get_stream_sources(subject_id: str, detail_path: str, se: int = 1, ep:
     play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
-        resp = await client.get(play_url, headers={**PLAYER_HEADERS, "Referer": player_referer})
+        resp = await client.get(play_url, headers={**PLAYER_HEADERS, **_geo_headers(client_ip), "Referer": player_referer})
         data = resp.json().get("data", {})
 
     has_resource = data.get("hasResource", False)
@@ -514,8 +537,10 @@ async def get_stream_sources(subject_id: str, detail_path: str, se: int = 1, ep:
     }
 
 @app.get("/api/stream/{subject_id}/captions")
-async def get_captions(subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
-    dom_data = await _make_request(f"{API_BASE}/media-player/get-domain")
+async def get_captions(request: Request, subject_id: str, detail_path: str, se: int = 1, ep: int = 1):
+    client_ip = _client_ip(request)
+
+    dom_data = await _make_request(f"{API_BASE}/media-player/get-domain", client_ip=client_ip)
     domain = dom_data.get("data", "https://netfilm.world").rstrip("/")
 
     player_referer = (
@@ -525,7 +550,7 @@ async def get_captions(subject_id: str, detail_path: str, se: int = 1, ep: int =
     play_url = f"{domain}/wefeed-h5api-bff/subject/play?subjectId={subject_id}&se={se}&ep={ep}&detailPath={detail_path}"
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
-        play_resp = await client.get(play_url, headers={**PLAYER_HEADERS, "Referer": player_referer})
+        play_resp = await client.get(play_url, headers={**PLAYER_HEADERS, **_geo_headers(client_ip), "Referer": player_referer})
         play_data = play_resp.json().get("data", {})
 
     streams = play_data.get("streams", [])
@@ -547,7 +572,7 @@ async def get_captions(subject_id: str, detail_path: str, se: int = 1, ep: int =
         f"{API_BASE}/subject/caption"
         f"?format={stream_format}&id={stream_id}&subjectId={subject_id}&detailPath={detail_path}"
     )
-    data = await _make_request(cap_url)
+    data = await _make_request(cap_url, client_ip=client_ip)
     inner = data.get("data", {})
     captions = inner.get("captions", []) if isinstance(inner, dict) else inner
     return {"subject_id": subject_id, "se": se, "ep": ep, "count": len(captions), "captions": captions}
