@@ -5,6 +5,9 @@
 [![Status](https://img.shields.io/badge/Status-1080p_Active-brightgreen?style=flat-square)](https://moviebox.ph)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](https://opensource.org/licenses/MIT)
 
+> It doesnt work properly, Moviebox blocking the bypass
+
+
 REST API for MovieBox with 1080p stream extraction, adaptive DASH manifests, multi-language subtitle parsing, and an embedded web dashboard.
 
 ---
